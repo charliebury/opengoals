@@ -11,6 +11,8 @@ CHEMBL_DRUG_DATA = './evs_chembl-edit.tsv'
 PPI_DATA = './untitled.txt'
 REPURPOSED_DRUGS = './drug_repurposing_curated-edit.tsv'
 GENE_DISEASE_RELATIONS = './matrix_all_18.06.csv'
+INTACT_DATA = './intact.txt'
+REACTASSOC_DATA = './Reactassoc2.tsv'
 
 
 class drugs_to_disease():
@@ -30,10 +32,20 @@ class drugs_to_disease():
             with open('disease_ids.pickle', 'wb') as f:
                 pickle.dump(self.disease_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+            csv_diseases = open('disease_ids.csv', 'w')
+            for val, lab in self.disease_ids.items():
+                csv_diseases.write('{},{}\n'.format(lab, val))
+            csv_diseases.close()
+
             self.read_chembl_drugs()
 
             with open('drug_ids.pickle', 'wb') as f:
                 pickle.dump(self.drug_ids, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            csv_drugs = open('drug_ids.csv', 'w')
+            for val, lab in self.drug_ids.items():
+                csv_drugs.write('{},{}\n'.format(lab, val))
+            csv_drugs.close()
 
             self.make_drugs_vs_genes_array()
             self.make_genes_vs_disease_array()
@@ -41,8 +53,17 @@ class drugs_to_disease():
             self.drugs_straight_to_diseases()
         else:
             self.retrieve_arrays()
+            self.compare_two_arrays()
+            # self.add_intact_relations()
+            # self.add_reactassoc_relations()
+            self.multiply_arrays(save_pickle=False, operation='mult')
+            self.compare_two_arrays()
 
-        self.compare_two_arrays()
+            # save the final array at the end of a run
+            with open('drugs_vs_disease_mult-after-PPIandPathways.pickle', 'wb') as f:
+                pickle.dump(self.drugs_disease_mult_array, f, protocol=pickle.HIGHEST_PROTOCOL)
+            return
+
         # self.read_repurposed_drug_set()
 
     def read_chembl_drugs(self, do_prints=False):
@@ -85,14 +106,6 @@ class drugs_to_disease():
 
         # get a conserved ordering schemes
         self.drug_ids = {drug: ind for ind, drug in enumerate(sorted(set(drugs)))}
-
-        # for gene in genes:
-        #     if gene not in self.genes_full:
-        #         print('Warning, gene from CHEMBL set not in relation set')
-
-        # for disease in diseases:
-        #     if disease not in self.diseases_full:
-        #         print('Warning, disease from CHEMBL set not in relation set')
 
         self.drugs = drugs
         self.genes_with_drugs = genes
@@ -142,7 +155,7 @@ class drugs_to_disease():
             progress(i, tot_count)
             if np.isnan(self.max_clinic_stage[i]):
                 print(drug, gene)
-            dg_arr[self.drug_ids[drug], self.gene_ids[gene]] = self.max_clinic_stage[i]
+            dg_arr[self.drug_ids[drug], self.gene_ids[gene]] = 1#self.max_clinic_stage[i]
 
         if plot_heatmap:
             fig = plt.figure()
@@ -160,21 +173,12 @@ class drugs_to_disease():
 
     def make_genes_vs_disease_array(self, plot_heatmap=False):
 
-        # dg_arr = np.zeros((len(self.disease_ids.keys()), len(self.gene_ids.keys())))
-        # for i, (gene, disease) in enumerate(zip(self.genes, self.diseases)):
-        #     if np.isnan(self.max_clinic_stage[i]):
-        #         print(gene, disease)
-        #     dg_arr[self.disease_ids[disease], self.gene_ids[gene]] = self.max_clinic_stage[i]
-
         print('making genes vs disease array')
         dg_arr = np.zeros((len(self.gene_ids.keys()), len(self.disease_ids.keys())))
-
-        print(dg_arr.shape)
 
         tot_count = len(self.genes_full)
         for i, (gene, disease) in enumerate(zip(self.genes_full, self.diseases_full)):
             progress(i, tot_count)
-            # dg_arr[self.gene_ids[gene], self.disease_ids[disease]] = 1
             dg_arr[self.gene_ids[gene], self.disease_ids[disease]] = self.overall_relation_scores_full[i]
 
         if plot_heatmap:
@@ -191,7 +195,7 @@ class drugs_to_disease():
             pickle.dump(dg_arr, f, protocol=pickle.HIGHEST_PROTOCOL)
         np.savetxt('genes_vs_diseases.csv', dg_arr, delimiter=',')
 
-    def drugs_straight_to_diseases(self):
+    def drugs_straight_to_diseases(self, plot_heatmap=True):
 
         drug_disease_arr = np.zeros((len(self.drug_ids), len(self.disease_ids)))
         tot_count = len(self.drugs)
@@ -205,9 +209,36 @@ class drugs_to_disease():
             pickle.dump(drug_disease_arr, f, protocol=pickle.HIGHEST_PROTOCOL)
         np.savetxt('drugs_diseases_chembl.csv', drug_disease_arr, delimiter=',')
 
-    def multiply_arrays(self, plot_heatmap=False):
+        if plot_heatmap:
+            fig = plt.figure()
+            sns.heatmap(drug_disease_arr)
+            fig.suptitle('drugs vs diseases array', fontsize=14)
+            plt.xlabel('drug id', fontsize=12)
+            plt.ylabel('disease id', fontsize=12)
+            fig.savefig('./drugsVsDiseases-chembl.png')
 
-        drugsVdisease = np.matmul(self.drugs_genes_array, self.genes_vs_disease_array)
+    def multiply_arrays(self, plot_heatmap=True, save_pickle=True, operation='mult'):
+
+        if operation == 'mult':
+            drugsVdisease = np.matmul(self.drugs_genes_array, self.genes_vs_disease_array)
+
+            # find number of genes linked in chembl per drug
+            num_genes_per_drug = np.sum(self.drugs_genes_array, axis=1)
+
+            # divide by number of genes per drug to compute an average drug-disease
+            # score across a range of intermediate genes
+            drugsVdisease = drugsVdisease/num_genes_per_drug[:, None]
+
+        elif operation == 'max':
+            drugsVdisease = np.zeros((self.drugs_genes_array.shape[0], self.genes_vs_disease_array.shape[1]))
+            tot_count = self.drugs_genes_array.shape[0]
+            for i, drug_id in enumerate(range(self.drugs_genes_array.shape[0])):
+                progress(i, tot_count)
+                drug_to_genes = self.drugs_genes_array[drug_id, :]
+                for disease_id in range(self.genes_vs_disease_array.shape[1]):
+                    genes_to_disease = self.genes_vs_disease_array[:, disease_id]
+                    max_score = np.max(genes_to_disease*drug_to_genes)
+                    drugsVdisease[drug_id, disease_id] = max_score
 
         if plot_heatmap:
             fig = plt.figure()
@@ -215,11 +246,24 @@ class drugs_to_disease():
             fig.suptitle('drugs vs diseases array', fontsize=14)
             plt.xlabel('disease id', fontsize=12)
             plt.ylabel('drug id', fontsize=12)
-            fig.savefig('./drugsVsDiseases.png')
+            fig.savefig('./drugsVsDiseases-{}.png'.format(operation))
 
-        with open('drugs_vs_disease_mult.pickle', 'wb') as f:
-            pickle.dump(drugsVdisease, f, protocol=pickle.HIGHEST_PROTOCOL)
-        np.savetxt('drugs_vs_disease_mult.csv', drugsVdisease, delimiter=',')
+            fig = plt.figure()
+            sns.heatmap(self.drugs_straight_to_diseases_array)
+            fig.suptitle('drugs vs diseases array', fontsize=14)
+            plt.xlabel('disease id', fontsize=12)
+            plt.ylabel('drug id', fontsize=12)
+            fig.savefig('./drugsVsDiseases-chembl.png')
+
+        if save_pickle:
+            with open('drugs_vs_disease_{}.pickle'.format(operation), 'wb') as f:
+                pickle.dump(drugsVdisease, f, protocol=pickle.HIGHEST_PROTOCOL)
+            np.savetxt('drugs_vs_disease_{}.csv'.format(operation), drugsVdisease, delimiter=',')
+
+        if operation == 'mult':
+            self.drugs_disease_mult_array = drugsVdisease
+        elif operation == 'max':
+            self.drugs_disease_max_array = drugsVdisease
 
     def retrieve_arrays(self):
 
@@ -246,55 +290,96 @@ class drugs_to_disease():
         with open('drug_ids.pickle', 'rb') as f:
             self.drug_ids = pickle.load(f)
 
-    def compare_two_arrays(self, threshold=0):
+    def compare_two_arrays(self, threshold_chembl=0, threshold_mult=1, print_text=False):
 
         a = self.drugs_straight_to_diseases_array
         b = self.drugs_disease_mult_array
-        a_threshed = (a > threshold).astype(int)
-        b_threshed = (b > threshold).astype(int)
+        a_threshed = (a > threshold_chembl).astype(int)
+        b_threshed = (b > threshold_mult).astype(int)
 
         drugIds_to_names = {v: k for k, v in self.drug_ids.items()}
 
+        all_hits_count = 0
         for i in range(a_threshed.shape[0]):
             a_row = a_threshed[i]
             b_row = b_threshed[i]
 
             comb_row = a_row + b_row
-            hits = np.sum((comb_row > 1).astype(int))
+            num_hits = np.sum((comb_row > 1).astype(int))
 
-            total_possible = np.sum(a_row)
-            total_possible2 = np.sum(b_row)
+            gene_num_reported_in_chembl = np.sum(a_row)
+            predicted_gene_nums_mult = np.sum(b_row)
 
-            if hits != total_possible:
-                print(drugIds_to_names[i])
-                print('{}, {}, {}'.format(hits, total_possible, total_possible2))
-            # else:
-            #     print('{}, {}, {}'.format(hits, total_possible, total_possible2))
+            if num_hits != gene_num_reported_in_chembl:
+                if print_text:
+                    print(drugIds_to_names[i])
+                    print('{}, {}, {}'.format(
+                        num_hits, gene_num_reported_in_chembl, predicted_gene_nums_mult))
+            else:
+                all_hits_count += 1
 
+        print('All known drug-diseases found: {}/{}'.format(
+            all_hits_count, a_threshed.shape[0]))
 
+    def add_intact_relations(self, weight=0.01):
+        """
+        add the intact relationships between genes.
+        Currently, if a relationship if found between gene A and gene B,
+        then the gene-to-disease score for gene B is updated to include the
+        average of the original gene B score with the score of gene A (the relative
+        contribution of this average relative to the original B score is determined
+        by the provided confidence value that gene A and B are similar.
+        If the confidence score is 0 between A and B, this would leave B with its
+        original value, a score of 1 would make the new B score the full average of
+        A and B's original scores
+        """
 
+        df = pd.read_csv(INTACT_DATA, sep='\t')
+        gene_A = df['Gene A'].values
+        gene_B = df['Gene B'].values
+        pair_confidence = df['Confidence'].values
 
+        not_found = 0
+        for i, (g_a, g_b) in enumerate(zip(gene_A, gene_B)):
+            if g_a in self.gene_ids.keys() and g_b in self.gene_ids.keys():
+                g_a_id = self.gene_ids[g_a]
+                g_b_id = self.gene_ids[g_b]
+                contrib_from_a = self.genes_vs_disease_array[g_a_id, :]
+                original_b_score = self.genes_vs_disease_array[g_b_id, :]
+                average_score = np.mean([contrib_from_a, original_b_score], axis=0)
+                weighting = weight*pair_confidence[i]
+                self.genes_vs_disease_array[g_b_id, :] = average_score*weighting + (1-weighting)*original_b_score
+            else:
+                not_found += 1
+        print('# gene pairs not found: ', not_found)
 
+    def add_reactassoc_relations(self, weight=0.1):
 
-
-
-
-
-
-
-
-
-    # def add_PPI_to_gene_disease_array(self, dg_arr, f_in='./PPI_data.txt', split_by=','):
-    #     with open(f_in) as f:
-    #         contents = f.readlines()
-    #     for ln in contents:
-    #         primary_gene = ln.split(split_by)[0]
-    #         second_genes = ln.split(split_by)[1:]
-    #         # check that gene has a suitable id
-    #         if primary_gene in self.gene_ids.keys():
-    #             primary_gene_id = self.gene_ids[primary_gene]
-    #         else:
-    #             print('Warning, gene {} not found in original set!'.format(primary_gene))
+        f_in = open(REACTASSOC_DATA, 'r')
+        contents = f_in.readlines()
+        f_in.close()
+        tot_count = len(contents)
+        for i, ln in enumerate(contents):
+            progress(i, tot_count)
+            ln = ln.replace('\n', '')
+            primary_gene = ln.split('\t')[0]
+            other_genes = ln.split('\t')[1:]
+            try:
+                prim_gene_id = self.gene_ids[primary_gene]
+            except KeyError:
+                print('Primary gene not found.. skipping')
+                continue
+            contrib_from_primary = self.genes_vs_disease_array[prim_gene_id, :]
+            for j, other_gene in enumerate(other_genes):
+                if j > 2:
+                    break
+                try:
+                    oth_gene_id = self.gene_ids[other_gene]
+                except KeyError:
+                    continue
+                orig_oth_score = self.genes_vs_disease_array[oth_gene_id, :]
+                average_score = np.mean([contrib_from_primary, orig_oth_score], axis=0)
+                self.genes_vs_disease_array[oth_gene_id, :] = average_score*weight + (1-weight)*orig_oth_score
 
 
     # def read_repurposed_drug_set(self):
